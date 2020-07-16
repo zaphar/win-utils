@@ -1,5 +1,6 @@
 [workspace]
 members = [
-    "sensors",
+    "winapi-perf-wrapper",
     "service",
+    "perf-util",
 ]

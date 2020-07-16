@@ -19,6 +19,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "perf-util"
+version = "0.1.0"
+dependencies = [
+ "winapi-perf-wrapper 0.1.0",
+]
+
+[[package]]
 name = "proc-macro-error"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -66,13 +73,6 @@ dependencies = [
  "proc-macro2 1.0.18 (registry+https://github.com/rust-lang/crates.io-index)",
  "quote 1.0.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "syn 1.0.33 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "sensors"
-version = "0.1.0"
-dependencies = [
- "winapi 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -141,6 +141,13 @@ dependencies = [
 name = "winapi-i686-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "winapi-perf-wrapper"
+version = "0.1.0"
+dependencies = [
+ "winapi 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
 [[package]]
 name = "winapi-x86_64-pc-windows-gnu"
