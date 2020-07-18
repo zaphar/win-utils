@@ -8,3 +8,4 @@ edition = "2018"
 
 [dependencies]
 winapi-perf-wrapper = { path="../winapi-perf-wrapper" }
+winapi = {version = "^0.3.8", features = ["winbase"]}

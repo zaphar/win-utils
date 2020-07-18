@@ -1,14 +1,12 @@
-use winapi::ctypes::c_void;
 use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
 use winapi::shared::winerror::ERROR_SUCCESS;
 use winapi::um::pdh::{
-    PdhCloseQuery, PdhEnumObjectItemsW, PdhEnumObjectsW, PdhOpenQueryW, PDH_HQUERY as HQuery,
-    PERF_DETAIL_STANDARD,
+    PDH_FMT_COUNTERVALUE_u, PdhAddCounterW, PdhCloseQuery, PdhCollectQueryData,
+    PdhEnumObjectItemsW, PdhEnumObjectsW, PdhGetFormattedCounterValue, PdhOpenQueryW,
+    PdhRemoveCounter, PdhValidatePathW, PDH_FMT_COUNTERVALUE, PDH_HCOUNTER as HCounter,
+    PDH_HQUERY as HQuery, PERF_DETAIL_STANDARD,
 };
 
-use std::ffi::{OsStr, OsString};
-use std::iter::once;
-use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
 pub mod constants;
@@ -45,6 +43,11 @@ fn zeroed_buffer(sz: usize) -> Vec<u16> {
 impl PDH {
     pub fn new() -> Self {
         Self { machine_name: None }
+    }
+
+    pub fn with_machine_name<S: Into<String>>(mut self, machine_name: S) -> Self {
+        self.machine_name = Some(machine_name.into().encode_utf16().collect());
+        self
     }
 
     fn enumerate_objects(&mut self) -> Result<Vec<String>, PDHStatus> {
@@ -152,7 +155,7 @@ impl PDH {
     pub fn enumerate_counters(&mut self) -> Result<Vec<String>, PDHStatus> {
         let mut counter_path_vec = Vec::new();
         let path_prefix = if let Some(ref machine_name) = self.machine_name {
-            format!("/{}", String::from_utf16_lossy(machine_name.as_slice()))
+            format!("\\\\{}", String::from_utf16_lossy(machine_name.as_slice()))
         } else {
             String::new()
         };
@@ -187,15 +190,88 @@ impl PdhQuery {
         &mut self.0
     }
 
-    // TODO Add counter?
+    pub fn add_counter<S: Into<String>>(&mut self, path: S) -> Result<PdhCounter, PDHStatus> {
+        let wide_path = path.into().encode_utf16().collect::<Vec<u16>>();
+        let mut status = unsafe { PdhValidatePathW(wide_path.as_ptr()) } as u32;
+        if status != ERROR_SUCCESS {
+            return Err(dbg!(status));
+        }
+        let mut counter_handle: HCounter = null_mut();
+        status =
+            unsafe { PdhAddCounterW(self.0, wide_path.as_ptr(), 0, &mut counter_handle) } as u32;
+        if status != ERROR_SUCCESS {
+            return Err(status);
+        }
+        return Ok(PdhCounter(counter_handle));
+    }
 
-    // TODO Counter data interator?
+    #[allow(unused_variables)]
+    pub fn remove_counter(&self, counter_handle: PdhCounter) {
+        // when the counter is dropped it will be removed from the query.
+        // We consume the counter in the process so it can't be reused.
+        // As such this function has not body. It exists only to consume the counter.
+    }
+
+    pub fn collect_data(
+        &self,
+        counter: &PdhCounter,
+        format: u32,
+    ) -> Result<PDH_FMT_COUNTERVALUE, PDHStatus> {
+        let mut status = unsafe { PdhCollectQueryData(self.0) } as u32;
+        if status != ERROR_SUCCESS {
+            return Err(dbg!(status));
+        }
+        let mut fmt_counter_value = unsafe {
+            PDH_FMT_COUNTERVALUE {
+                CStatus: 0,
+                u: std::mem::zeroed::<PDH_FMT_COUNTERVALUE_u>(),
+            }
+        };
+        let mut counter_type: u32 = 0;
+        status = unsafe {
+            PdhGetFormattedCounterValue(
+                counter.0,
+                format,
+                &mut counter_type,
+                &mut fmt_counter_value,
+            )
+        } as u32;
+        if status != ERROR_SUCCESS {
+            return Err(dbg!(status));
+        }
+        return Ok(fmt_counter_value);
+    }
+
+    pub fn collect_long_data(&self, counter: &PdhCounter) -> Result<i32, PDHStatus> {
+        let fmt_counter_value = self.collect_data(counter, PDH_FMT_LONG)?;
+        return Ok(unsafe { *fmt_counter_value.u.longValue() });
+    }
+
+    pub fn collect_large_data(&self, counter: &PdhCounter) -> Result<i64, PDHStatus> {
+        let fmt_counter_value = self.collect_data(counter, PDH_FMT_LARGE)?;
+        return Ok(unsafe { *fmt_counter_value.u.largeValue() });
+    }
+
+    pub fn collect_double_data(&self, counter: &PdhCounter) -> Result<f64, PDHStatus> {
+        let fmt_counter_value = self.collect_data(counter, PDH_FMT_DOUBLE)?;
+        return Ok(unsafe { *fmt_counter_value.u.doubleValue() });
+    }
 }
 
 impl Drop for PdhQuery {
     fn drop(&mut self) {
         unsafe {
             PdhCloseQuery(self.0);
+        }
+    }
+}
+
+pub struct PdhCounter(HCounter);
+
+impl Drop for PdhCounter {
+    fn drop(&mut self) {
+        unsafe {
+            PdhRemoveCounter(self.0);
         }
     }
 }
