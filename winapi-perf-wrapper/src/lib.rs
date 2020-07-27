@@ -18,20 +18,22 @@ pub struct PDH {
     machine_name: Option<Vec<u16>>,
 }
 
-fn null_separated_to_vec(mut buf: Vec<u16>) -> Vec<String> {
+fn null_separated_to_vec(mut buf: Vec<u16>) -> Vec<Vec<u16>> {
     // The buffer is terminated by two nulls so we pop the last two off
     // for our partition below to work.
     buf.pop();
     buf.pop();
     let mut v = Vec::new();
     for item in buf.split(|el| *el == 0) {
-        v.push(String::from_utf16_lossy(item));
+        v.push(item.to_owned());
     }
     return v;
 }
 
 fn str_to_utf16(s: &str) -> Vec<u16> {
-    s.encode_utf16().collect()
+    let mut v = s.encode_utf16().collect::<Vec<u16>>();
+    v.push(0);
+    v
 }
 
 fn zeroed_buffer(sz: usize) -> Vec<u16> {
@@ -45,12 +47,13 @@ impl PDH {
         Self { machine_name: None }
     }
 
-    pub fn with_machine_name<S: Into<String>>(mut self, machine_name: S) -> Self {
-        self.machine_name = Some(machine_name.into().encode_utf16().collect());
+    pub fn with_machine_name(mut self, machine_name: Vec<u16>) -> Self {
+        self.machine_name = Some(machine_name);
+        // We need our machine_name to be a null terminated string.
         self
     }
 
-    fn enumerate_objects(&mut self) -> Result<Vec<String>, PDHStatus> {
+    pub fn enumerate_objects(&mut self) -> Result<Vec<Vec<u16>>, PDHStatus> {
         let data_source = null_mut();
         let machine_name = if let Some(ref mut machine_name) = self.machine_name {
             machine_name.as_mut_ptr()
@@ -97,8 +100,11 @@ impl PDH {
         }
     }
 
-    fn enumerate_items(&mut self, obj: &str) -> Result<(Vec<String>, Vec<String>), PDHStatus> {
-        let mut object_name = str_to_utf16(&obj);
+    pub fn enumerate_items(
+        &mut self,
+        obj: &Vec<u16>,
+    ) -> Result<(Vec<Vec<u16>>, Vec<Vec<u16>>), PDHStatus> {
+        let mut object_name = obj.clone();
         let mut counter_list_len: DWORD = 0;
         let mut instance_list_len: DWORD = 0;
         let mut status = unsafe {
@@ -155,6 +161,7 @@ impl PDH {
     pub fn enumerate_counters(&mut self) -> Result<Vec<String>, PDHStatus> {
         let mut counter_path_vec = Vec::new();
         let path_prefix = if let Some(ref machine_name) = self.machine_name {
+            // First we need to pad the machine name with null bytes.
             format!("\\\\{}", String::from_utf16_lossy(machine_name.as_slice()))
         } else {
             String::new()
@@ -167,15 +174,22 @@ impl PDH {
                 }
                 Err(s) => return Err(s),
             };
+            let obj = String::from_utf16_lossy(obj.as_slice());
             for i in &instances {
-                let i = if i == "" {
+                let i = if i.is_empty() {
                     String::new()
                 } else {
-                    format!("({})", i)
+                    format!("({})", String::from_utf16_lossy(i))
                 };
                 for c in &counters {
                     // TODO
-                    counter_path_vec.push(format!("{}\\{}{}\\{}", path_prefix, obj, i, c));
+                    counter_path_vec.push(format!(
+                        "{}\\{}{}\\{}",
+                        path_prefix,
+                        obj,
+                        i,
+                        String::from_utf16_lossy(c)
+                    ));
                 }
             }
         }
@@ -191,7 +205,7 @@ impl PdhQuery {
     }
 
     pub fn add_counter<S: Into<String>>(&mut self, path: S) -> Result<PdhCounter, PDHStatus> {
-        let wide_path = path.into().encode_utf16().collect::<Vec<u16>>();
+        let wide_path = str_to_utf16(&path.into());
         let mut status = unsafe { PdhValidatePathW(wide_path.as_ptr()) } as u32;
         if status != ERROR_SUCCESS {
             return Err(dbg!(status));
@@ -200,7 +214,7 @@ impl PdhQuery {
         status =
             unsafe { PdhAddCounterW(self.0, wide_path.as_ptr(), 0, &mut counter_handle) } as u32;
         if status != ERROR_SUCCESS {
-            return Err(status);
+            return Err(dbg!(status));
         }
         return Ok(PdhCounter(counter_handle));
     }
