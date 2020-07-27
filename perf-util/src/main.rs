@@ -18,7 +18,7 @@ pub fn print_object_counters(pdh: &mut PDH, obj: &str) {
     let mut obj_utf16 = obj.encode_utf16().collect::<Vec<u16>>();
     obj_utf16.push(0); // We want the machine name to be null terminated.
     let (counters, instances) = pdh
-        .enumerate_items(&obj_utf16)
+        .enumerate_items_utf16(&obj_utf16)
         .map_err(|s| constants::pdh_status_friendly_name(s))
         .unwrap();
     for i in &instances {
@@ -37,7 +37,7 @@ pub fn print_object_counters(pdh: &mut PDH, obj: &str) {
 pub fn print_performance_objects(pdh: &mut PDH) {
     println!("Performance Counter objects:");
     let mut sorted_counters = pdh
-        .enumerate_objects()
+        .enumerate_objects_utf16()
         .map_err(|s| constants::pdh_status_friendly_name(s))
         .unwrap();
     sorted_counters.sort();

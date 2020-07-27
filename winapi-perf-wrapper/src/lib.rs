@@ -53,7 +53,7 @@ impl PDH {
         self
     }
 
-    pub fn enumerate_objects(&mut self) -> Result<Vec<Vec<u16>>, PDHStatus> {
+    pub fn enumerate_objects_utf16(&mut self) -> Result<Vec<Vec<u16>>, PDHStatus> {
         let data_source = null_mut();
         let machine_name = if let Some(ref mut machine_name) = self.machine_name {
             machine_name.as_mut_ptr()
@@ -100,7 +100,7 @@ impl PDH {
         }
     }
 
-    pub fn enumerate_items(
+    pub fn enumerate_items_utf16(
         &mut self,
         obj: &Vec<u16>,
     ) -> Result<(Vec<Vec<u16>>, Vec<Vec<u16>>), PDHStatus> {
@@ -166,8 +166,8 @@ impl PDH {
         } else {
             String::new()
         };
-        for obj in self.enumerate_objects()? {
-            let (counters, instances) = match self.enumerate_items(&obj) {
+        for obj in self.enumerate_objects_utf16()? {
+            let (counters, instances) = match self.enumerate_items_utf16(&obj) {
                 Ok(t) => t,
                 Err(PDH_CSTATUS_NO_OBJECT) => {
                     continue;
