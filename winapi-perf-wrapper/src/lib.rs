@@ -53,6 +53,14 @@ impl PDH {
         self
     }
 
+    pub fn enumerate_objects_string(&mut self) -> Result<Vec<String>, PDHStatus> {
+        self.enumerate_objects_utf16().map(|mut v| {
+            v.drain(0..)
+                .map(|v| String::from_utf16_lossy(v.as_slice()))
+                .collect()
+        })
+    }
+
     pub fn enumerate_objects_utf16(&mut self) -> Result<Vec<Vec<u16>>, PDHStatus> {
         let data_source = null_mut();
         let machine_name = if let Some(ref mut machine_name) = self.machine_name {
@@ -98,6 +106,24 @@ impl PDH {
             // Error! we expected more data here.
             return Err(status);
         }
+    }
+
+    pub fn enumerate_items_string<S: Into<String>>(
+        &mut self,
+        obj: S,
+    ) -> Result<(Vec<String>, Vec<String>), PDHStatus> {
+        self.enumerate_items_utf16(&str_to_utf16(&obj.into()))
+            .map(|(mut cs, mut insts)| {
+                (
+                    cs.drain(0..)
+                        .map(|v| String::from_utf16_lossy(v.as_slice()))
+                        .collect(),
+                    insts
+                        .drain(0..)
+                        .map(|v| String::from_utf16_lossy(v.as_slice()))
+                        .collect(),
+                )
+            })
     }
 
     pub fn enumerate_items_utf16(
@@ -204,8 +230,7 @@ impl PdhQuery {
         &mut self.0
     }
 
-    pub fn add_counter<S: Into<String>>(&mut self, path: S) -> Result<PdhCounter, PDHStatus> {
-        let wide_path = str_to_utf16(&path.into());
+    pub fn add_counter_utf16(&mut self, wide_path: Vec<u16>) -> Result<PdhCounter, PDHStatus> {
         let mut status = unsafe { PdhValidatePathW(wide_path.as_ptr()) } as u32;
         if status != ERROR_SUCCESS {
             return Err(dbg!(status));
@@ -217,6 +242,13 @@ impl PdhQuery {
             return Err(dbg!(status));
         }
         return Ok(PdhCounter(counter_handle));
+    }
+
+    pub fn add_counter_string<S: Into<String>>(
+        &mut self,
+        path: S,
+    ) -> Result<PdhCounter, PDHStatus> {
+        self.add_counter_utf16(str_to_utf16(&path.into()))
     }
 
     #[allow(unused_variables)]
