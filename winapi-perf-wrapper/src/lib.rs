@@ -8,6 +8,7 @@ use winapi::um::pdh::{
 };
 
 use std::ptr::null_mut;
+use std::time::Duration;
 
 pub mod constants;
 use constants::*;
@@ -323,6 +324,7 @@ pub trait ValueStream<ValueType> {
 pub struct CounterIterator<'a, ValueType> {
     query_handle: &'a PdhQuery,
     counter_handle: PdhCounter,
+    collect_delay: Option<Duration>,
     phantom: std::marker::PhantomData<ValueType>,
 }
 
@@ -332,24 +334,39 @@ impl<'a, ValueType> CounterIterator<'a, ValueType> {
             query_handle: query_handle,
             counter_handle: counter_handle,
             phantom: std::marker::PhantomData,
+            collect_delay: None,
         }
+    }
+
+    pub fn with_delay<D: Into<Duration>>(mut self, delay: D) -> Self {
+        self.collect_delay = Some(delay.into());
+        return self;
     }
 }
 
 impl<'a> ValueStream<i32> for CounterIterator<'a, i32> {
     fn next(&self) -> Result<i32, PDHStatus> {
+        if let Some(d) = self.collect_delay {
+            std::thread::sleep(d);
+        }
         self.query_handle.collect_long_data(&self.counter_handle)
     }
 }
 
 impl<'a> ValueStream<i64> for CounterIterator<'a, i64> {
     fn next(&self) -> Result<i64, PDHStatus> {
+        if let Some(d) = self.collect_delay {
+            std::thread::sleep(d);
+        }
         self.query_handle.collect_large_data(&self.counter_handle)
     }
 }
 
 impl<'a> ValueStream<f64> for CounterIterator<'a, f64> {
     fn next(&self) -> Result<f64, PDHStatus> {
+        if let Some(d) = self.collect_delay {
+            std::thread::sleep(d);
+        }
         self.query_handle.collect_double_data(&self.counter_handle)
     }
 }

@@ -76,7 +76,8 @@ fn main() {
         String::from_utf16_lossy(machine_name.as_slice())
     );
     let mut pdh = PDH::new().with_machine_name(machine_name);
-    let cpu_counter = r"\\JWALL-SURFACE\Processor information(_Total)\% Processor Time";
+    //let cpu_counter = r"\\JWALL-SURFACE\Processor information(_Total)\% Processor Time";
+    let cpu_counter = r"\\JWALL-SURFACE\Processor Information(_Total)\% Processor Time";
     let query = pdh
         .open_query()
         .map_err(|e| constants::pdh_status_friendly_name(e))
@@ -84,16 +85,13 @@ fn main() {
     let iterator: CounterIterator<i32> = query
         .get_data_iterator_from_path(cpu_counter)
         .map_err(|s| constants::pdh_status_friendly_name(s))
-        .unwrap();
-    for _ in 1..10 {
+        .unwrap()
+        .with_delay(std::time::Duration::from_millis(1000));
+    //let mem_counter = r"\\JWALL-SURFACE\Memory\Available Bytes";
+    loop {
         match iterator.next() {
             Ok(v) => println!("{}: {}", cpu_counter, v),
             Err(s) => eprintln!("Err: {}", constants::pdh_status_friendly_name(s)),
         }
     }
-    //println!("Trying counter {}", cpu_counter);
-    //print_counter_value(&mut pdh, cpu_counter);
-    //let mem_counter = r"\\JWALL-SURFACE\Memory\Available Bytes";
-    //println!("Trying counter {}", mem_counter);
-    //print_counter_value(&mut pdh, mem_counter);
 }
