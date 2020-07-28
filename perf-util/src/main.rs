@@ -1,6 +1,6 @@
 use winapi::um::winbase::GetComputerNameW;
 use winapi_perf_wrapper::constants;
-use winapi_perf_wrapper::PDH;
+use winapi_perf_wrapper::*;
 
 pub fn print_counters(pdh: &mut PDH) {
     let mut counter_paths = pdh
@@ -45,7 +45,7 @@ pub fn print_performance_objects(pdh: &mut PDH) {
 }
 
 pub fn print_counter_value(pdh: &mut PDH, path: &str) {
-    let mut query = pdh
+    let query = pdh
         .open_query()
         .map_err(|e| constants::pdh_status_friendly_name(e))
         .unwrap();
@@ -76,13 +76,21 @@ fn main() {
         String::from_utf16_lossy(machine_name.as_slice())
     );
     let mut pdh = PDH::new().with_machine_name(machine_name);
-    //print_performance_objects(&mut pdh);
-    print_object_counters(&mut pdh, "Processor Information");
-    //print_counters(&mut pdh);
-    //let disk_counter = r"\\JWALL-SURFACE\LogicalDisk(_Total)\% Free Space";
-    //println!("Trying counter {}", disk_counter);
-    //print_counter_value(&mut pdh, disk_counter);
-    //let cpu_counter = r"\\JWALL-SURFACE\Processor information(_Total)\% Processor Time";
+    let cpu_counter = r"\\JWALL-SURFACE\Processor information(_Total)\% Processor Time";
+    let query = pdh
+        .open_query()
+        .map_err(|e| constants::pdh_status_friendly_name(e))
+        .unwrap();
+    let iterator: CounterIterator<i32> = query
+        .get_data_iterator_from_path(cpu_counter)
+        .map_err(|s| constants::pdh_status_friendly_name(s))
+        .unwrap();
+    for _ in 1..10 {
+        match iterator.next() {
+            Ok(v) => println!("{}: {}", cpu_counter, v),
+            Err(s) => eprintln!("Err: {}", constants::pdh_status_friendly_name(s)),
+        }
+    }
     //println!("Trying counter {}", cpu_counter);
     //print_counter_value(&mut pdh, cpu_counter);
     //let mem_counter = r"\\JWALL-SURFACE\Memory\Available Bytes";

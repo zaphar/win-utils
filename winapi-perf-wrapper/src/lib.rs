@@ -230,7 +230,7 @@ impl PdhQuery {
         &mut self.0
     }
 
-    pub fn add_counter_utf16(&mut self, wide_path: Vec<u16>) -> Result<PdhCounter, PDHStatus> {
+    pub fn add_counter_utf16(&self, wide_path: Vec<u16>) -> Result<PdhCounter, PDHStatus> {
         let mut status = unsafe { PdhValidatePathW(wide_path.as_ptr()) } as u32;
         if status != ERROR_SUCCESS {
             return Err(dbg!(status));
@@ -244,10 +244,7 @@ impl PdhQuery {
         return Ok(PdhCounter(counter_handle));
     }
 
-    pub fn add_counter_string<S: Into<String>>(
-        &mut self,
-        path: S,
-    ) -> Result<PdhCounter, PDHStatus> {
+    pub fn add_counter_string<S: Into<String>>(&self, path: S) -> Result<PdhCounter, PDHStatus> {
         self.add_counter_utf16(str_to_utf16(&path.into()))
     }
 
@@ -255,7 +252,7 @@ impl PdhQuery {
     pub fn remove_counter(&self, counter_handle: PdhCounter) {
         // when the counter is dropped it will be removed from the query.
         // We consume the counter in the process so it can't be reused.
-        // As such this function has not body. It exists only to consume the counter.
+        // As such this function has no body. It exists only to consume the counter.
     }
 
     pub fn collect_data(
@@ -288,6 +285,21 @@ impl PdhQuery {
         return Ok(fmt_counter_value);
     }
 
+    pub fn get_data_iterator_from_path<S: Into<String>, ValueType>(
+        &self,
+        counter_path: S,
+    ) -> Result<CounterIterator<ValueType>, PDHStatus> {
+        let counter_handle = self.add_counter_string(counter_path)?;
+        Ok(CounterIterator::new(self, counter_handle))
+    }
+
+    pub fn get_data_iterator_from_handle<ValueType>(
+        &self,
+        counter: PdhCounter,
+    ) -> CounterIterator<ValueType> {
+        CounterIterator::new(self, counter)
+    }
+
     pub fn collect_long_data(&self, counter: &PdhCounter) -> Result<i32, PDHStatus> {
         let fmt_counter_value = self.collect_data(counter, PDH_FMT_LONG)?;
         return Ok(unsafe { *fmt_counter_value.u.longValue() });
@@ -301,6 +313,44 @@ impl PdhQuery {
     pub fn collect_double_data(&self, counter: &PdhCounter) -> Result<f64, PDHStatus> {
         let fmt_counter_value = self.collect_data(counter, PDH_FMT_DOUBLE)?;
         return Ok(unsafe { *fmt_counter_value.u.doubleValue() });
+    }
+}
+
+pub trait ValueStream<ValueType> {
+    fn next(&self) -> Result<ValueType, PDHStatus>;
+}
+
+pub struct CounterIterator<'a, ValueType> {
+    query_handle: &'a PdhQuery,
+    counter_handle: PdhCounter,
+    phantom: std::marker::PhantomData<ValueType>,
+}
+
+impl<'a, ValueType> CounterIterator<'a, ValueType> {
+    pub fn new<'b: 'a>(query_handle: &'b PdhQuery, counter_handle: PdhCounter) -> Self {
+        Self {
+            query_handle: query_handle,
+            counter_handle: counter_handle,
+            phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'a> ValueStream<i32> for CounterIterator<'a, i32> {
+    fn next(&self) -> Result<i32, PDHStatus> {
+        self.query_handle.collect_long_data(&self.counter_handle)
+    }
+}
+
+impl<'a> ValueStream<i64> for CounterIterator<'a, i64> {
+    fn next(&self) -> Result<i64, PDHStatus> {
+        self.query_handle.collect_large_data(&self.counter_handle)
+    }
+}
+
+impl<'a> ValueStream<f64> for CounterIterator<'a, f64> {
+    fn next(&self) -> Result<f64, PDHStatus> {
+        self.query_handle.collect_double_data(&self.counter_handle)
     }
 }
 
