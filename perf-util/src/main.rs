@@ -1,3 +1,17 @@
+// Copyright 2020 Jeremy Wall
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use winapi::um::winbase::GetComputerNameW;
 use winapi_perf_wrapper::constants;
 use winapi_perf_wrapper::*;
@@ -82,8 +96,8 @@ fn main() {
         .open_query()
         .map_err(|e| constants::pdh_status_friendly_name(e))
         .unwrap();
-    let iterator: CounterIterator<i32> = query
-        .get_data_iterator_from_path(cpu_counter)
+    let iterator: CounterStream<i32> = query
+        .get_value_stream_from_path(cpu_counter)
         .map_err(|s| constants::pdh_status_friendly_name(s))
         .unwrap()
         .with_delay(std::time::Duration::from_millis(1000));

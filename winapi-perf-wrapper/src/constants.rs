@@ -1,12 +1,27 @@
+// Copyright 2020 Jeremy Wall
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 #![allow(dead_code)]
+
+// TODO(jwall): Get these constants features in winapi-rs.
 
 pub type PDHStatus = u32;
 
 // pdh.h
-pub const PDH_MAX_COUNTER_PATH: PDHStatus = 2048;
-pub const PDH_MAX_COUNTER_NAME: PDHStatus = 1024;
-pub const PDH_MAX_INSTANCE_NAME: PDHStatus = 1024;
-pub const PDH_MAX_DATASOURCE_PATH: PDHStatus = 1024;
+pub const PDH_MAX_COUNTER_PATH: u32 = 2048;
+pub const PDH_MAX_COUNTER_NAME: u32 = 1024;
+pub const PDH_MAX_INSTANCE_NAME: u32 = 1024;
+pub const PDH_MAX_DATASOURCE_PATH: u32 = 1024;
 // pdhmsg.h
 pub const PDH_DIALOG_CANCELLED: PDHStatus = 0x800007D9;
 pub const PDH_MORE_DATA: PDHStatus = 0x800007D2;
