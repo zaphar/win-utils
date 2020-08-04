@@ -28,6 +28,7 @@ use std::ptr::null_mut;
 use std::time::Duration;
 
 pub mod constants;
+pub use constants::PDHStatus;
 use constants::*;
 
 fn null_separated_to_vec(mut buf: Vec<u16>) -> Vec<Vec<u16>> {
@@ -265,13 +266,13 @@ impl PdhQuery {
     pub fn add_counter_utf16(&self, wide_path: Vec<u16>) -> Result<PdhCounter, PDHStatus> {
         let mut status = unsafe { PdhValidatePathW(wide_path.as_ptr()) } as u32;
         if status != ERROR_SUCCESS {
-            return Err(dbg!(status));
+            return Err(status);
         }
         let mut counter_handle: HCounter = null_mut();
         status =
             unsafe { PdhAddCounterW(self.0, wide_path.as_ptr(), 0, &mut counter_handle) } as u32;
         if status != ERROR_SUCCESS {
-            return Err(dbg!(status));
+            return Err(status);
         }
         return Ok(PdhCounter(counter_handle));
     }
@@ -296,7 +297,7 @@ impl PdhQuery {
     ) -> Result<PDH_FMT_COUNTERVALUE, PDHStatus> {
         let mut status = unsafe { PdhCollectQueryData(self.0) } as u32;
         if status != ERROR_SUCCESS {
-            return Err(dbg!(status));
+            return Err(status);
         }
         let mut fmt_counter_value = unsafe {
             PDH_FMT_COUNTERVALUE {
@@ -314,7 +315,7 @@ impl PdhQuery {
             )
         } as u32;
         if status != ERROR_SUCCESS {
-            return Err(dbg!(status));
+            return Err(status);
         }
         return Ok(fmt_counter_value);
     }
