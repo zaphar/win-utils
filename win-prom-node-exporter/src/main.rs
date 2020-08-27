@@ -1,24 +1,31 @@
+use std::convert::Into;
+use std::env;
 use std::ffi::OsString;
 use std::time::Duration;
 
 use anyhow;
 use crossbeam_utils::thread;
 use docopt;
+use eventlog;
 use log::{debug, error, info};
 use prometheus;
 use prometheus::Encoder;
 use winapi_perf_wrapper::{CounterStream, PDHStatus, PdhQuery, ValueStream, PDH};
 use windows_service;
 use windows_service::service::{
-    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
+    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+    ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{
     self, ServiceControlHandlerResult, ServiceStatusHandle,
 };
+use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 mod perf_paths;
 
 const SERVICENAME: &'static str = "win_prom_node_exporter";
+const DISPLAYNAME: &'static str = "Windows Prometheus Node Exporter";
+const LOGNAME: &'static str = "Windows Prometheus Node Exporter Log";
 
 const USAGE: &'static str = "
 Windows Prometheus Node Exporter
@@ -27,9 +34,10 @@ Usage: win-prom-node-exporter [options]
 
 Options:
     -h --help            Show this help text
-    --delaySecs=S        Delay between collections from windows performance counters in seconds. [default=10]
-    --listenHost=IPPORT  IP and Port combination for the http service to export prometheus metrics on. [default=0.0.0.0:8080]
+    --delaySecs=S        Delay between collections from windows performance counters in seconds. [default: 10]
+    --listenHost=IPPORT  IP and Port combination for the http service to export prometheus metrics on. [default: 0.0.0.0:8080]
     --debug              Enable debug logging
+    --install            Install the windows service with the provided options
 ";
 
 fn flags() -> docopt::Docopt {
@@ -62,6 +70,11 @@ fn win_service_main(args: Vec<OsString>) {
         service_control_handler::register(SERVICENAME, service_event_handler).unwrap();
 
     if let Ok(argv) = parsed {
+        if argv.get_bool("--debug") || cfg!(debug_assertions) {
+            eventlog::init(LOGNAME, log::Level::Debug).unwrap();
+        } else {
+            eventlog::init(LOGNAME, log::Level::Info).unwrap();
+        };
         if let Err(e) = win_service_wrapper(argv, &status_handle) {
             status_handle
                 .set_service_status(ServiceStatus {
@@ -82,9 +95,10 @@ fn win_service_main(args: Vec<OsString>) {
                 })
                 .unwrap(); // if this failed then we are in deep trouble. Just crash.
 
-            eprintln!("Error starting service: {}", e);
+            error!("Error starting service: {}", e);
         }
     } else {
+        eventlog::init(LOGNAME, log::Level::Debug).unwrap();
         status_handle
             .set_service_status(ServiceStatus {
                 // Should match the one from system service registry
@@ -103,12 +117,12 @@ fn win_service_main(args: Vec<OsString>) {
                 process_id: None,
             })
             .unwrap(); // if this failed then we are in deep trouble. Just crash.
-        eprintln!("{}", parsed.unwrap_err());
+        error!("{}", parsed.unwrap_err());
     }
 }
 
 fn win_service_wrapper(
-    args: docopt::ArgvMap,
+    argv: docopt::ArgvMap,
     status_handle: &ServiceStatusHandle,
 ) -> anyhow::Result<()> {
     let prom_cpu_pct_gauge = prometheus::GaugeVec::new(
@@ -176,8 +190,8 @@ fn win_service_wrapper(
         process_id: None,
     })?;
 
-    let listen_host = args.get_str("listenHost");
-    let delay_secs: u64 = args.get_count("delaySecs");
+    let listen_host = argv.get_str("--listenHost");
+    let delay_secs: u64 = argv.get_count("--delaySecs");
 
     Ok(thread::scope(|s| {
         s.spawn(|_| {
@@ -285,19 +299,51 @@ fn win_service_wrapper(
 
 windows_service::define_windows_service!(ffi_service_main, win_service_main);
 
+fn flags_from_argmap(argv: &docopt::ArgvMap) -> Vec<OsString> {
+    let mut args: Vec<OsString> = Vec::new();
+    if argv.get_bool("--debug") {
+        args.push("--debug".into());
+    }
+    let host = argv.get_str("--listenHost");
+    if host != "" {
+        args.push("--listenHost".into());
+        args.push(host.into());
+    }
+    let secs = argv.get_str("--delaySecs");
+    if secs != "" {
+        args.push("--delaySecs".into());
+        args.push(secs.into());
+    }
+    return args;
+}
+
 fn main() -> anyhow::Result<()> {
     let docopt = flags();
     let argv = docopt.parse().unwrap_or_else(|e| e.exit());
 
-    let level = if argv.get_bool("debug") || cfg!(debug_assertions) {
-        2
+    if argv.get_bool("--install") {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)?;
+
+        let my_service_info = ServiceInfo {
+            name: OsString::from(SERVICENAME),
+            display_name: OsString::from(DISPLAYNAME),
+            service_type: ServiceType::OWN_PROCESS,
+            start_type: ServiceStartType::OnDemand,
+            error_control: ServiceErrorControl::Normal,
+            // Derive this from our current path.
+            executable_path: dbg!(env::current_exe().unwrap()),
+            // Derive this our existing arguments.
+            launch_arguments: dbg!(flags_from_argmap(&argv)),
+            dependencies: vec![],
+            account_name: None, // run as System
+            account_password: None,
+        };
+
+        manager.create_service(&my_service_info, ServiceAccess::QUERY_STATUS)?;
+        eventlog::register(LOGNAME).unwrap();
     } else {
-        3
-    };
-    stderrlog::new()
-        .verbosity(level)
-        .timestamp(stderrlog::Timestamp::Millisecond)
-        .init()?;
-    windows_service::service_dispatcher::start(SERVICENAME, ffi_service_main)?;
+        windows_service::service_dispatcher::start(SERVICENAME, ffi_service_main)?;
+    }
     Ok(())
 }
