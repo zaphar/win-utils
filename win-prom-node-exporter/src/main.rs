@@ -1,3 +1,6 @@
+use std::ffi::OsString;
+use std::time::Duration;
+
 use anyhow;
 use crossbeam_utils::thread;
 use gflags;
@@ -5,6 +8,13 @@ use log::{debug, error, info};
 use prometheus;
 use prometheus::Encoder;
 use winapi_perf_wrapper::{CounterStream, PDHStatus, PdhQuery, ValueStream, PDH};
+use windows_service;
+use windows_service::service::{
+    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
+};
+use windows_service::service_control_handler::{
+    self, ServiceControlHandlerResult, ServiceStatusHandle,
+};
 
 mod perf_paths;
 
@@ -29,6 +39,11 @@ gflags::define! {
     --debug = false
 }
 
+gflags::define! {
+    /// Windows Service Name
+    --serviceName = "win_prom_node_exporter"
+}
+
 fn usage(code: i32) {
     println!("win-prom-node-exporter <flags>");
     println!("");
@@ -42,22 +57,48 @@ fn get_value_stream<'query_life, NumType>(
     query.get_value_stream_from_path::<_, NumType>(path)
 }
 
-fn main() -> anyhow::Result<()> {
-    gflags::parse();
-    if HELP.flag {
-        usage(0);
-    }
-
-    let level = if DEBUG.flag || cfg!(debug_assertions) {
-        2
-    } else {
-        3
+fn win_service_main(args: Vec<OsString>) {
+    let service_event_handler = move |control_event| -> ServiceControlHandlerResult {
+        match control_event {
+            ServiceControl::Interrogate => {
+                // TODO correctly handle the stop event.
+                ServiceControlHandlerResult::NoError
+            }
+            _ => ServiceControlHandlerResult::NotImplemented,
+        }
     };
-    stderrlog::new()
-        .verbosity(level)
-        .timestamp(stderrlog::Timestamp::Millisecond)
-        .init()?;
 
+    let status_handle =
+        service_control_handler::register(SERVICENAME.flag, service_event_handler).unwrap();
+
+    if let Err(e) = win_service_wrapper(args, &status_handle) {
+        status_handle
+            .set_service_status(ServiceStatus {
+                // Should match the one from system service registry
+                service_type: ServiceType::OWN_PROCESS,
+                // The new state
+                current_state: ServiceState::Stopped,
+                // Accept no events when running
+                controls_accepted: ServiceControlAccept::empty(),
+                // Used to report an error when starting or stopping only, otherwise must be zero
+                exit_code: ServiceExitCode::Win32(1),
+                // Only used for pending states, otherwise must be zero
+                checkpoint: 0,
+                // Only used for pending states, otherwise must be zero
+                wait_hint: Duration::default(),
+                // Unused for setting status
+                process_id: None,
+            })
+            .unwrap(); // if this failed then we are in deep trouble. Just crash.
+
+        eprintln!("Error starting service: {}", e);
+    }
+}
+
+fn win_service_wrapper(
+    _args: Vec<OsString>,
+    status_handle: &ServiceStatusHandle,
+) -> anyhow::Result<()> {
     let prom_cpu_pct_gauge = prometheus::GaugeVec::new(
         prometheus::Opts::new("cpu_total_pct", perf_paths::CPU_TOTAL_PCT),
         &[],
@@ -105,6 +146,24 @@ fn main() -> anyhow::Result<()> {
     registry.register(Box::new(prom_mem_available_guage.clone()))?;
     registry.register(Box::new(prom_mem_cache_guage.clone()))?;
     registry.register(Box::new(prom_mem_committed_guage.clone()))?;
+
+    status_handle.set_service_status(ServiceStatus {
+        // Should match the one from system service registry
+        service_type: ServiceType::OWN_PROCESS,
+        // The new state
+        current_state: ServiceState::Running,
+        // Accept stop events when running
+        controls_accepted: ServiceControlAccept::STOP,
+        // Used to report an error when starting or stopping only, otherwise must be zero
+        exit_code: ServiceExitCode::Win32(0),
+        // Only used for pending states, otherwise must be zero
+        checkpoint: 0,
+        // Only used for pending states, otherwise must be zero
+        wait_hint: Duration::default(),
+        // Unused for setting status
+        process_id: None,
+    })?;
+
     Ok(thread::scope(|s| {
         s.spawn(|_| {
             info!("Starting server on {}", LISTENHOST.flag);
@@ -207,4 +266,25 @@ fn main() -> anyhow::Result<()> {
         });
     })
     .unwrap())
+}
+
+windows_service::define_windows_service!(ffi_service_main, win_service_main);
+
+fn main() -> anyhow::Result<()> {
+    gflags::parse();
+    if HELP.flag {
+        usage(0);
+    }
+
+    let level = if DEBUG.flag || cfg!(debug_assertions) {
+        2
+    } else {
+        3
+    };
+    stderrlog::new()
+        .verbosity(level)
+        .timestamp(stderrlog::Timestamp::Millisecond)
+        .init()?;
+    windows_service::service_dispatcher::start(SERVICENAME.flag, ffi_service_main)?;
+    Ok(())
 }

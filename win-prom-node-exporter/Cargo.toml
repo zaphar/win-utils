@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 winapi-perf-wrapper = { path="../winapi-perf-wrapper" }
+windows-service = "^0.3.0"
 anyhow = "1"
 gflags = "^0.3"
 log = "0.4"
