@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow;
 use crossbeam_utils::thread;
-use gflags;
+use docopt;
 use log::{debug, error, info};
 use prometheus;
 use prometheus::Encoder;
@@ -18,36 +18,22 @@ use windows_service::service_control_handler::{
 
 mod perf_paths;
 
-gflags::define!(
-    /// Print this help text.
-    -h,
-    --help = false
-);
+const SERVICENAME: &'static str = "win_prom_node_exporter";
 
-gflags::define! {
-    /// Delay between collections from windows performance counters.
-    --delaySecs: u64 = 10
-}
+const USAGE: &'static str = "
+Windows Prometheus Node Exporter
 
-gflags::define! {
-    /// address:port to listen on for exporting variables prometheus style.
-    --listenHost = "0.0.0.0:8080"
-}
+Usage: win-prom-node-exporter [options]
 
-gflags::define! {
-    /// Enable debug logging
-    --debug = false
-}
+Options:
+    -h --help            Show this help text
+    --delaySecs=S        Delay between collections from windows performance counters in seconds. [default=10]
+    --listenHost=IPPORT  IP and Port combination for the http service to export prometheus metrics on. [default=0.0.0.0:8080]
+    --debug              Enable debug logging
+";
 
-gflags::define! {
-    /// Windows Service Name
-    --serviceName = "win_prom_node_exporter"
-}
-
-fn usage(code: i32) {
-    println!("win-prom-node-exporter <flags>");
-    println!("");
-    gflags::print_help_and_exit(code);
+fn flags() -> docopt::Docopt {
+    docopt::Docopt::new(USAGE).unwrap()
 }
 
 fn get_value_stream<'query_life, NumType>(
@@ -58,6 +44,10 @@ fn get_value_stream<'query_life, NumType>(
 }
 
 fn win_service_main(args: Vec<OsString>) {
+    let docopt = flags();
+    let parsed = docopt
+        .argv(args.iter().map(|s| s.to_string_lossy().to_owned()))
+        .parse();
     let service_event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Interrogate => {
@@ -69,9 +59,32 @@ fn win_service_main(args: Vec<OsString>) {
     };
 
     let status_handle =
-        service_control_handler::register(SERVICENAME.flag, service_event_handler).unwrap();
+        service_control_handler::register(SERVICENAME, service_event_handler).unwrap();
 
-    if let Err(e) = win_service_wrapper(args, &status_handle) {
+    if let Ok(argv) = parsed {
+        if let Err(e) = win_service_wrapper(argv, &status_handle) {
+            status_handle
+                .set_service_status(ServiceStatus {
+                    // Should match the one from system service registry
+                    service_type: ServiceType::OWN_PROCESS,
+                    // The new state
+                    current_state: ServiceState::Stopped,
+                    // Accept no events when running
+                    controls_accepted: ServiceControlAccept::empty(),
+                    // Used to report an error when starting or stopping only, otherwise must be zero
+                    exit_code: ServiceExitCode::Win32(1),
+                    // Only used for pending states, otherwise must be zero
+                    checkpoint: 0,
+                    // Only used for pending states, otherwise must be zero
+                    wait_hint: Duration::default(),
+                    // Unused for setting status
+                    process_id: None,
+                })
+                .unwrap(); // if this failed then we are in deep trouble. Just crash.
+
+            eprintln!("Error starting service: {}", e);
+        }
+    } else {
         status_handle
             .set_service_status(ServiceStatus {
                 // Should match the one from system service registry
@@ -90,13 +103,12 @@ fn win_service_main(args: Vec<OsString>) {
                 process_id: None,
             })
             .unwrap(); // if this failed then we are in deep trouble. Just crash.
-
-        eprintln!("Error starting service: {}", e);
+        eprintln!("{}", parsed.unwrap_err());
     }
 }
 
 fn win_service_wrapper(
-    _args: Vec<OsString>,
+    args: docopt::ArgvMap,
     status_handle: &ServiceStatusHandle,
 ) -> anyhow::Result<()> {
     let prom_cpu_pct_gauge = prometheus::GaugeVec::new(
@@ -164,10 +176,13 @@ fn win_service_wrapper(
         process_id: None,
     })?;
 
+    let listen_host = args.get_str("listenHost");
+    let delay_secs: u64 = args.get_count("delaySecs");
+
     Ok(thread::scope(|s| {
         s.spawn(|_| {
-            info!("Starting server on {}", LISTENHOST.flag);
-            let server = tiny_http::Server::http(LISTENHOST.flag).unwrap();
+            info!("Starting server on {}", listen_host);
+            let server = tiny_http::Server::http(listen_host).unwrap();
             loop {
                 info!("Waiting for request");
                 match server.recv() {
@@ -261,7 +276,7 @@ fn win_service_wrapper(
                         .set(v as f64);
                 }
                 debug!("Sleeping until next collection");
-                std::thread::sleep(std::time::Duration::from_secs(DELAYSECS.flag));
+                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
             }
         });
     })
@@ -271,12 +286,10 @@ fn win_service_wrapper(
 windows_service::define_windows_service!(ffi_service_main, win_service_main);
 
 fn main() -> anyhow::Result<()> {
-    gflags::parse();
-    if HELP.flag {
-        usage(0);
-    }
+    let docopt = flags();
+    let argv = docopt.parse().unwrap_or_else(|e| e.exit());
 
-    let level = if DEBUG.flag || cfg!(debug_assertions) {
+    let level = if argv.get_bool("debug") || cfg!(debug_assertions) {
         2
     } else {
         3
@@ -285,6 +298,6 @@ fn main() -> anyhow::Result<()> {
         .verbosity(level)
         .timestamp(stderrlog::Timestamp::Millisecond)
         .init()?;
-    windows_service::service_dispatcher::start(SERVICENAME.flag, ffi_service_main)?;
+    windows_service::service_dispatcher::start(SERVICENAME, ffi_service_main)?;
     Ok(())
 }
