@@ -16,9 +16,7 @@ use windows_service::service::{
     ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
     ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
-use windows_service::service_control_handler::{
-    self, ServiceControlHandlerResult, ServiceStatusHandle,
-};
+use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 mod perf_paths;
@@ -39,6 +37,7 @@ Options:
     --debug              Enable debug logging
     --install            Install the windows service with the provided options
     --remove             Remove the windows service with the provided options
+    --no-service         Don't run as a Windows Service.
 ";
 
 fn flags() -> docopt::Docopt {
@@ -50,6 +49,24 @@ fn get_value_stream<'query_life, NumType>(
     path: &str,
 ) -> Result<CounterStream<'query_life, NumType>, PDHStatus> {
     query.get_value_stream_from_path::<_, NumType>(path)
+}
+
+fn init_log(argv: &docopt::ArgvMap) -> anyhow::Result<()> {
+    if argv.get_bool("--no-service") {
+        dbg!(stderrlog::new()
+            .timestamp(stderrlog::Timestamp::Millisecond)
+            .verbosity(if argv.get_bool("--debug") || cfg!(debug_assertions) {
+                3
+            } else {
+                2
+            })
+            .init())?;
+    } else if argv.get_bool("--debug") || cfg!(debug_assertions) {
+        eventlog::init(LOGNAME, log::Level::Debug)?;
+    } else {
+        eventlog::init(LOGNAME, log::Level::Info)?;
+    }
+    Ok(())
 }
 
 fn win_service_main(args: Vec<OsString>) {
@@ -70,13 +87,28 @@ fn win_service_main(args: Vec<OsString>) {
     let status_handle =
         service_control_handler::register(SERVICENAME, service_event_handler).unwrap();
 
+    let ready_hook = || -> anyhow::Result<()> {
+        status_handle.set_service_status(ServiceStatus {
+            // Should match the one from system service registry
+            service_type: ServiceType::OWN_PROCESS,
+            // The new state
+            current_state: ServiceState::Running,
+            // Accept stop events when running
+            controls_accepted: ServiceControlAccept::STOP,
+            // Used to report an error when starting or stopping only, otherwise must be zero
+            exit_code: ServiceExitCode::Win32(0),
+            // Only used for pending states, otherwise must be zero
+            checkpoint: 0,
+            // Only used for pending states, otherwise must be zero
+            wait_hint: Duration::default(),
+            // Unused for setting status
+            process_id: None,
+        })?;
+        Ok(())
+    };
+
     if let Ok(argv) = parsed {
-        if argv.get_bool("--debug") || cfg!(debug_assertions) {
-            eventlog::init(LOGNAME, log::Level::Debug).unwrap();
-        } else {
-            eventlog::init(LOGNAME, log::Level::Info).unwrap();
-        };
-        if let Err(e) = win_service_wrapper(argv, &status_handle) {
+        if let Err(e) = win_service_impl(argv, ready_hook) {
             status_handle
                 .set_service_status(ServiceStatus {
                     // Should match the one from system service registry
@@ -122,10 +154,11 @@ fn win_service_main(args: Vec<OsString>) {
     }
 }
 
-fn win_service_wrapper(
-    argv: docopt::ArgvMap,
-    status_handle: &ServiceStatusHandle,
-) -> anyhow::Result<()> {
+fn win_service_impl<F>(argv: docopt::ArgvMap, ready_hook: F) -> anyhow::Result<()>
+where
+    F: FnOnce() -> anyhow::Result<()>,
+{
+    init_log(&argv).unwrap();
     let prom_cpu_pct_gauge = prometheus::GaugeVec::new(
         prometheus::Opts::new("cpu_total_pct", perf_paths::CPU_TOTAL_PCT),
         &[],
@@ -175,22 +208,7 @@ fn win_service_wrapper(
     registry.register(Box::new(prom_mem_cache_guage.clone()))?;
     registry.register(Box::new(prom_mem_committed_guage.clone()))?;
 
-    status_handle.set_service_status(ServiceStatus {
-        // Should match the one from system service registry
-        service_type: ServiceType::OWN_PROCESS,
-        // The new state
-        current_state: ServiceState::Running,
-        // Accept stop events when running
-        controls_accepted: ServiceControlAccept::STOP,
-        // Used to report an error when starting or stopping only, otherwise must be zero
-        exit_code: ServiceExitCode::Win32(0),
-        // Only used for pending states, otherwise must be zero
-        checkpoint: 0,
-        // Only used for pending states, otherwise must be zero
-        wait_hint: Duration::default(),
-        // Unused for setting status
-        process_id: None,
-    })?;
+    dbg!(ready_hook()?);
 
     let listen_host = argv.get_str("--listenHost");
     let delay_secs: u64 = argv.get_count("--delaySecs");
@@ -349,6 +367,8 @@ fn main() -> anyhow::Result<()> {
         let service = manager.open_service(SERVICENAME, ServiceAccess::DELETE)?;
         service.delete()?;
         eventlog::deregister(LOGNAME)?;
+    } else if argv.get_bool("--no-service") {
+        win_service_impl(argv, || Ok(()))?;
     } else {
         // TODO(jwall): non-service mode.
         windows_service::service_dispatcher::start(SERVICENAME, ffi_service_main)?;
