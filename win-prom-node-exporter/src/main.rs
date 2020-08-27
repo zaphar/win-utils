@@ -38,6 +38,7 @@ Options:
     --listenHost=IPPORT  IP and Port combination for the http service to export prometheus metrics on. [default: 0.0.0.0:8080]
     --debug              Enable debug logging
     --install            Install the windows service with the provided options
+    --remove             Remove the windows service with the provided options
 ";
 
 fn flags() -> docopt::Docopt {
@@ -161,6 +162,7 @@ fn win_service_wrapper(
         prometheus::Opts::new("mem_committed_bytes", perf_paths::MEM_COMMITTED_BYTES),
         &[],
     )?;
+
     debug!("Setting up registry of prometheus metrics");
     let registry = prometheus::Registry::new();
     registry.register(Box::new(prom_cpu_pct_gauge.clone()))?;
@@ -332,7 +334,7 @@ fn main() -> anyhow::Result<()> {
             start_type: ServiceStartType::OnDemand,
             error_control: ServiceErrorControl::Normal,
             // Derive this from our current path.
-            executable_path: dbg!(env::current_exe().unwrap()),
+            executable_path: dbg!(env::current_exe()?),
             // Derive this our existing arguments.
             launch_arguments: dbg!(flags_from_argmap(&argv)),
             dependencies: vec![],
@@ -341,8 +343,14 @@ fn main() -> anyhow::Result<()> {
         };
 
         manager.create_service(&my_service_info, ServiceAccess::QUERY_STATUS)?;
-        eventlog::register(LOGNAME).unwrap();
+        eventlog::register(LOGNAME)?;
+    } else if argv.get_bool("--remove") {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::all())?;
+        let service = manager.open_service(SERVICENAME, ServiceAccess::DELETE)?;
+        service.delete()?;
+        eventlog::deregister(LOGNAME)?;
     } else {
+        // TODO(jwall): non-service mode.
         windows_service::service_dispatcher::start(SERVICENAME, ffi_service_main)?;
     }
     Ok(())
