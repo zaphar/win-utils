@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::convert::Into;
 use std::env;
 use std::ffi::OsString;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow;
@@ -30,6 +30,10 @@ lazy_static::lazy_static! {
     static ref STOP_SIGNAL: RwLock<bool> = RwLock::new(false);
 }
 
+lazy_static::lazy_static! {
+    static ref SERVICE_ARGS: std::sync::Mutex<Option<docopt::ArgvMap>> = Mutex::new(None);
+}
+
 const SERVICENAME: &'static str = "win_prom_node_exporter";
 const DISPLAYNAME: &'static str = "Windows Prometheus Node Exporter";
 const LOGNAME: &'static str = "Windows Prometheus Node Exporter Log";
@@ -43,11 +47,10 @@ Options:
     -h --help            Show this help text
     --delaySecs=S        Delay between collections from windows performance counters in seconds. [default: 10]
     --listenHost=IPPORT  IP and Port combination for the http service to export prometheus metrics on. [default: 0.0.0.0:8080]
-    --debug              Enable debug logging
-    --install            Instal
+    --debug              Enable debug logging.
+    --install            Install this windows service with the provided command line flags.
+    --remove             Delete this windows service.
 
-use winapi_perf_wrapper::ValueStream;l the windows service with the provided options
- ;
     --no-service         Don't run as a Windows Service.
 ";
 
@@ -70,11 +73,6 @@ fn init_log(argv: &docopt::ArgvMap) -> anyhow::Result<()> {
 }
 
 fn win_service_main(args: Vec<OsString>) {
-    let docopt = flags();
-    info!("Started Service with args: {:?}", args);
-    let parsed = docopt
-        .argv(args.iter().map(|s| s.to_string_lossy().to_owned()))
-        .parse();
     let service_event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop | ServiceControl::Shutdown => {
@@ -111,30 +109,7 @@ fn win_service_main(args: Vec<OsString>) {
         Ok(())
     };
 
-    if let Ok(argv) = parsed {
-        if let Err(e) = win_service_impl(argv, ready_hook) {
-            status_handle
-                .set_service_status(ServiceStatus {
-                    // Should match the one from system service registry
-                    service_type: ServiceType::OWN_PROCESS,
-                    // The new state
-                    current_state: ServiceState::Stopped,
-                    // Accept no events when running
-                    controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-                    // Used to report an error when starting or stopping only, otherwise must be zero
-                    exit_code: ServiceExitCode::Win32(1),
-                    // Only used for pending states, otherwise must be zero
-                    checkpoint: 0,
-                    // Only used for pending states, otherwise must be zero
-                    wait_hint: Duration::default(),
-                    // Unused for setting status
-                    process_id: None,
-                })
-                .unwrap(); // if this failed then we are in deep trouble. Just crash.
-
-            error!("Error starting service: {}", e);
-        }
-    } else {
+    if let Err(e) = win_service_impl(ready_hook) {
         status_handle
             .set_service_status(ServiceStatus {
                 // Should match the one from system service registry
@@ -142,7 +117,7 @@ fn win_service_main(args: Vec<OsString>) {
                 // The new state
                 current_state: ServiceState::Stopped,
                 // Accept no events when running
-                controls_accepted: ServiceControlAccept::STOP,
+                controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
                 // Used to report an error when starting or stopping only, otherwise must be zero
                 exit_code: ServiceExitCode::Win32(1),
                 // Only used for pending states, otherwise must be zero
@@ -153,14 +128,22 @@ fn win_service_main(args: Vec<OsString>) {
                 process_id: None,
             })
             .unwrap(); // if this failed then we are in deep trouble. Just crash.
-        error!("{}", parsed.unwrap_err());
+
+        error!("Error starting service: {}", e);
     }
 }
 
-fn win_service_impl<F>(argv: docopt::ArgvMap, ready_hook: F) -> anyhow::Result<()>
+fn win_service_impl<F>(ready_hook: F) -> anyhow::Result<()>
 where
     F: FnOnce() -> anyhow::Result<()>,
 {
+    let argv = match (*SERVICE_ARGS.lock().unwrap()).clone() {
+        Some(argv) => argv,
+        None => {
+            panic!("Something very unexpected happen. This is a bug.");
+        }
+    };
+    debug!("{:?}", argv);
     let registry = prometheus::Registry::new();
 
     dbg!(ready_hook()?);
@@ -265,6 +248,8 @@ fn flags_from_argmap(argv: &docopt::ArgvMap) -> Vec<OsString> {
 fn main() -> anyhow::Result<()> {
     let docopt = flags();
     let argv = docopt.parse().unwrap_or_else(|e| e.exit());
+    let mut guard = SERVICE_ARGS.lock().unwrap();
+    *guard = Some(argv.clone());
 
     init_log(&argv).unwrap();
     if argv.get_bool("--install") {
@@ -294,7 +279,7 @@ fn main() -> anyhow::Result<()> {
         service.delete()?;
         eventlog::deregister(LOGNAME)?;
     } else if argv.get_bool("--no-service") {
-        win_service_impl(argv, || Ok(()))?;
+        win_service_impl(|| Ok(()))?;
     } else {
         windows_service::service_dispatcher::start(SERVICENAME, ffi_service_main)?;
     }
