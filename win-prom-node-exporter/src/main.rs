@@ -10,6 +10,7 @@ use eventlog;
 use log::{debug, error, info};
 use prometheus;
 use prometheus::Encoder;
+use winapi_perf_wrapper::constants::pdh_status_friendly_name;
 use winapi_perf_wrapper::{CounterStream, PDHStatus, PdhQuery, ValueStream, PDH};
 use windows_service;
 use windows_service::service::{
@@ -19,6 +20,7 @@ use windows_service::service::{
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
+mod binding;
 mod perf_paths;
 
 const SERVICENAME: &'static str = "win_prom_node_exporter";
@@ -154,59 +156,27 @@ fn win_service_main(args: Vec<OsString>) {
     }
 }
 
+fn build_metric_pair<'query_life>(
+    name: &str,
+    path: &str,
+    registry: &prometheus::Registry,
+    query: &'query_life PdhQuery,
+) -> anyhow::Result<(prometheus::GaugeVec, CounterStream<'query_life, f64>)> {
+    let gauge = prometheus::GaugeVec::new(prometheus::Opts::new(name, path), &[])?;
+    registry.register(Box::new(gauge.clone()))?;
+    Ok((
+        gauge,
+        get_value_stream::<f64>(query, path)
+            .map_err(|s| anyhow::Error::msg(pdh_status_friendly_name(s)))?,
+    ))
+}
+
 fn win_service_impl<F>(argv: docopt::ArgvMap, ready_hook: F) -> anyhow::Result<()>
 where
     F: FnOnce() -> anyhow::Result<()>,
 {
     init_log(&argv).unwrap();
-    let prom_cpu_pct_gauge = prometheus::GaugeVec::new(
-        prometheus::Opts::new("cpu_total_pct", perf_paths::CPU_TOTAL_PCT),
-        &[],
-    )?;
-    let prom_cpu_idle_gauge = prometheus::GaugeVec::new(
-        prometheus::Opts::new("cpu_idle_pct", perf_paths::CPU_IDLE_PCT),
-        &[],
-    )?;
-    let prom_cpu_user_gauge = prometheus::GaugeVec::new(
-        prometheus::Opts::new("cpu_user_pct", perf_paths::CPU_USER_PCT),
-        &[],
-    )?;
-    let prom_cpu_privileged_gauge = prometheus::GaugeVec::new(
-        prometheus::Opts::new("cpu_privileged_pct", perf_paths::CPU_PRIVILEGED_PCT),
-        &[],
-    )?;
-    let prom_cpu_priority_gauge = prometheus::GaugeVec::new(
-        prometheus::Opts::new("cpu_priority_pct", perf_paths::CPU_PRIORITY_PCT),
-        &[],
-    )?;
-    let prom_cpu_frequency_guage = prometheus::GaugeVec::new(
-        prometheus::Opts::new("cpu_frequency_gauge", perf_paths::CPU_FREQUENCY),
-        &[],
-    )?;
-    let prom_mem_available_guage = prometheus::GaugeVec::new(
-        prometheus::Opts::new("mem_available_bytes", perf_paths::MEM_AVAILABLE_BYTES),
-        &[],
-    )?;
-    let prom_mem_cache_guage = prometheus::GaugeVec::new(
-        prometheus::Opts::new("mem_cache_bytes", perf_paths::MEM_CACHE_BYTES),
-        &[],
-    )?;
-    let prom_mem_committed_guage = prometheus::GaugeVec::new(
-        prometheus::Opts::new("mem_committed_bytes", perf_paths::MEM_COMMITTED_BYTES),
-        &[],
-    )?;
-
-    debug!("Setting up registry of prometheus metrics");
     let registry = prometheus::Registry::new();
-    registry.register(Box::new(prom_cpu_pct_gauge.clone()))?;
-    registry.register(Box::new(prom_cpu_user_gauge.clone()))?;
-    registry.register(Box::new(prom_cpu_idle_gauge.clone()))?;
-    registry.register(Box::new(prom_cpu_frequency_guage.clone()))?;
-    registry.register(Box::new(prom_cpu_privileged_gauge.clone()))?;
-    registry.register(Box::new(prom_cpu_priority_gauge.clone()))?;
-    registry.register(Box::new(prom_mem_available_guage.clone()))?;
-    registry.register(Box::new(prom_mem_cache_guage.clone()))?;
-    registry.register(Box::new(prom_mem_committed_guage.clone()))?;
 
     dbg!(ready_hook()?);
 
@@ -240,74 +210,29 @@ where
             }
         });
         s.spawn(|_| {
-            debug!("Opening PDH Performance counter query");
+            // query needs to move into this thread completely if possible.
             let mut pdh = PDH::new();
+            debug!("Opening PDH Performance counter query");
             let query = pdh.open_query().unwrap();
-            debug!("Adding counters to query");
-            let cpu_total_stream =
-                get_value_stream::<f64>(&query, perf_paths::CPU_TOTAL_PCT).unwrap();
-            let cpu_idle_stream =
-                get_value_stream::<f64>(&query, perf_paths::CPU_IDLE_PCT).unwrap();
-            let cpu_user_stream =
-                get_value_stream::<f64>(&query, perf_paths::CPU_USER_PCT).unwrap();
-            let cpu_priority_stream =
-                get_value_stream::<f64>(&query, perf_paths::CPU_PRIORITY_PCT).unwrap();
-            let cpu_privileged_stream =
-                get_value_stream::<f64>(&query, perf_paths::CPU_PRIVILEGED_PCT).unwrap();
-            let cpu_frequency_stream =
-                get_value_stream::<f64>(&query, perf_paths::CPU_FREQUENCY).unwrap();
-            let mem_available_stream =
-                get_value_stream::<f64>(&query, perf_paths::MEM_AVAILABLE_BYTES).unwrap();
-            let mem_cache_stream =
-                get_value_stream::<f64>(&query, perf_paths::MEM_CACHE_BYTES).unwrap();
-            let mem_committed_stream =
-                get_value_stream::<f64>(&query, perf_paths::MEM_COMMITTED_BYTES).unwrap();
+            debug!("Setting up counters and prometheus guages");
+            let mut binding = binding::CounterToPrometheus::try_new(&registry).unwrap();
+            let pairs = binding
+                .register_pairs(vec![
+                    ("cpu_total_pct", perf_paths::CPU_TOTAL_PCT),
+                    ("cpu_idle_pct", perf_paths::CPU_IDLE_PCT),
+                    ("cpu_privileged_pct", perf_paths::CPU_PRIVILEGED_PCT),
+                    ("cpu_frequency_gauge", perf_paths::CPU_FREQUENCY),
+                    ("mem_available_bytes", perf_paths::MEM_AVAILABLE_BYTES),
+                    ("mem_cache_bytes", perf_paths::MEM_CACHE_BYTES),
+                    ("mem_committed_bytes", perf_paths::MEM_COMMITTED_BYTES),
+                ])
+                .unwrap();
             info!("Starting collection thread");
             loop {
-                if let Ok(v) = cpu_total_stream.next() {
-                    prom_cpu_pct_gauge
-                        .with(&prometheus::labels! {})
-                        .set(v as f64);
-                }
-                if let Ok(v) = cpu_idle_stream.next() {
-                    prom_cpu_idle_gauge
-                        .with(&prometheus::labels! {})
-                        .set(v as f64);
-                }
-                if let Ok(v) = cpu_user_stream.next() {
-                    prom_cpu_user_gauge
-                        .with(&prometheus::labels! {})
-                        .set(v as f64);
-                }
-                if let Ok(v) = cpu_privileged_stream.next() {
-                    prom_cpu_privileged_gauge
-                        .with(&prometheus::labels! {})
-                        .set(v as f64);
-                }
-                if let Ok(v) = cpu_priority_stream.next() {
-                    prom_cpu_priority_gauge
-                        .with(&prometheus::labels! {})
-                        .set(v as f64);
-                }
-                if let Ok(v) = cpu_frequency_stream.next() {
-                    prom_cpu_frequency_guage
-                        .with(&prometheus::labels! {})
-                        .set(v as f64);
-                }
-                if let Ok(v) = mem_available_stream.next() {
-                    prom_mem_available_guage
-                        .with(&prometheus::labels! {})
-                        .set(v as f64);
-                }
-                if let Ok(v) = mem_cache_stream.next() {
-                    prom_mem_cache_guage
-                        .with(&prometheus::labels! {})
-                        .set(v as f64);
-                }
-                if let Ok(v) = mem_committed_stream.next() {
-                    prom_mem_committed_guage
-                        .with(&prometheus::labels! {})
-                        .set(v as f64);
+                for (metric, stream) in pairs {
+                    if let Ok(v) = stream.next() {
+                        metric.with(&prometheus::labels! {}).set(v as f64);
+                    }
                 }
                 debug!("Sleeping until next collection");
                 std::thread::sleep(std::time::Duration::from_secs(delay_secs));
