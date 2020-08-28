@@ -1,17 +1,18 @@
+use std::cell::RefCell;
 use std::convert::Into;
 use std::env;
 use std::ffi::OsString;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow;
 use crossbeam_utils::thread;
 use docopt;
 use eventlog;
+use lazy_static;
 use log::{debug, error, info};
 use prometheus;
 use prometheus::Encoder;
-use winapi_perf_wrapper::constants::pdh_status_friendly_name;
-use winapi_perf_wrapper::{CounterStream, PdhQuery, ValueStream};
 use windows_service;
 use windows_service::service::{
     ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
@@ -20,8 +21,14 @@ use windows_service::service::{
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
+use winapi_perf_wrapper::ValueStream;
+
 mod binding;
 mod perf_paths;
+
+lazy_static::lazy_static! {
+    static ref STOP_SIGNAL: RwLock<bool> = RwLock::new(false);
+}
 
 const SERVICENAME: &'static str = "win_prom_node_exporter";
 const DISPLAYNAME: &'static str = "Windows Prometheus Node Exporter";
@@ -37,8 +44,10 @@ Options:
     --delaySecs=S        Delay between collections from windows performance counters in seconds. [default: 10]
     --listenHost=IPPORT  IP and Port combination for the http service to export prometheus metrics on. [default: 0.0.0.0:8080]
     --debug              Enable debug logging
-    --install            Install the windows service with the provided options
-    --remove             Remove the windows service with the provided options
+    --install            Instal
+
+use winapi_perf_wrapper::ValueStream;l the windows service with the provided options
+ ;
     --no-service         Don't run as a Windows Service.
 ";
 
@@ -67,8 +76,13 @@ fn win_service_main(args: Vec<OsString>) {
         .argv(args.iter().map(|s| s.to_string_lossy().to_owned()))
         .parse();
     let service_event_handler = move |control_event| -> ServiceControlHandlerResult {
-        // TODO correctly handle the stop event.
         match control_event {
+            ServiceControl::Stop | ServiceControl::Shutdown => {
+                info!("Recieved request to stop service. Setting STOP_SIGNAL to true.");
+                let mut guard = STOP_SIGNAL.write().unwrap();
+                *guard = true;
+                ServiceControlHandlerResult::NoError
+            }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
         }
@@ -84,7 +98,7 @@ fn win_service_main(args: Vec<OsString>) {
             // The new state
             current_state: ServiceState::Running,
             // Accept stop events when running
-            controls_accepted: ServiceControlAccept::STOP,
+            controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
             // Used to report an error when starting or stopping only, otherwise must be zero
             exit_code: ServiceExitCode::Win32(0),
             // Only used for pending states, otherwise must be zero
@@ -106,7 +120,7 @@ fn win_service_main(args: Vec<OsString>) {
                     // The new state
                     current_state: ServiceState::Stopped,
                     // Accept no events when running
-                    controls_accepted: ServiceControlAccept::empty(),
+                    controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
                     // Used to report an error when starting or stopping only, otherwise must be zero
                     exit_code: ServiceExitCode::Win32(1),
                     // Only used for pending states, otherwise must be zero
@@ -128,7 +142,7 @@ fn win_service_main(args: Vec<OsString>) {
                 // The new state
                 current_state: ServiceState::Stopped,
                 // Accept no events when running
-                controls_accepted: ServiceControlAccept::empty(),
+                controls_accepted: ServiceControlAccept::STOP,
                 // Used to report an error when starting or stopping only, otherwise must be zero
                 exit_code: ServiceExitCode::Win32(1),
                 // Only used for pending states, otherwise must be zero
@@ -159,6 +173,10 @@ where
             info!("Starting server on {}", listen_host);
             let server = tiny_http::Server::http(listen_host).unwrap();
             loop {
+                if *STOP_SIGNAL.read().unwrap() {
+                    debug!("Stopping prometheus metric server thread.");
+                    break;
+                }
                 info!("Waiting for request");
                 match server.recv() {
                     Ok(req) => {
@@ -207,6 +225,10 @@ where
                 .unwrap();
             info!("Starting collection thread");
             loop {
+                if *STOP_SIGNAL.read().unwrap() {
+                    debug!("Stopping metric collection thread.");
+                    break;
+                }
                 for (metric, stream) in pairs {
                     if let Ok(v) = stream.next() {
                         metric.with(&prometheus::labels! {}).set(v as f64);
