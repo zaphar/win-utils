@@ -19,9 +19,9 @@ use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
 use winapi::shared::winerror::ERROR_SUCCESS;
 use winapi::um::pdh::{
     PDH_FMT_COUNTERVALUE_u, PdhAddCounterW, PdhCloseQuery, PdhCollectQueryData,
-    PdhEnumObjectItemsW, PdhEnumObjectsW, PdhGetFormattedCounterValue, PdhOpenQueryW,
-    PdhRemoveCounter, PdhValidatePathW, PDH_FMT_COUNTERVALUE, PDH_HCOUNTER as HCounter,
-    PDH_HQUERY as HQuery, PERF_DETAIL_STANDARD,
+    PdhEnumObjectItemsW, PdhEnumObjectsW, PdhExpandCounterPathW, PdhGetFormattedCounterValue,
+    PdhOpenQueryW, PdhRemoveCounter, PdhValidatePathW, PDH_FMT_COUNTERVALUE,
+    PDH_HCOUNTER as HCounter, PDH_HQUERY as HQuery, PERF_DETAIL_STANDARD,
 };
 
 use std::ptr::null_mut;
@@ -135,7 +135,7 @@ impl PDH {
     /// Enumerates the objects counter items for the provided machine or the local machine.
     /// Returns a tuple of (counters, instances) for each of those counters.
     pub fn enumerate_items_string<S: Into<String>>(
-        &mut self,
+        &self,
         obj: S,
     ) -> Result<(Vec<String>, Vec<String>), PDHStatus> {
         self.enumerate_items_utf16(&str_to_utf16(&obj.into()))
@@ -155,7 +155,7 @@ impl PDH {
     /// Enumerates the objects counter items for the provided machine or the local machine.
     /// Returns a tuple of (counters, instances) for each of those counters.
     pub fn enumerate_items_utf16(
-        &mut self,
+        &self,
         obj: &Vec<u16>,
     ) -> Result<(Vec<Vec<u16>>, Vec<Vec<u16>>), PDHStatus> {
         let mut object_name = obj.clone();
@@ -203,7 +203,7 @@ impl PDH {
     }
 
     /// Opens a query for the configured machine or the local machine.
-    pub fn open_query(&mut self) -> Result<PdhQuery, PDHStatus> {
+    pub fn open_query(&self) -> Result<PdhQuery, PDHStatus> {
         let mut query = PdhQuery(null_mut());
         let status = unsafe { PdhOpenQueryW(null_mut(), 0, query.query()) } as u32;
 
@@ -250,6 +250,40 @@ impl PDH {
             }
         }
         return Ok(counter_path_vec);
+    }
+
+    pub fn expand_counter_path_utf16(&self, path: &Vec<u16>) -> Result<Vec<Vec<u16>>, PDHStatus> {
+        let mut counter_list_len: DWORD = 0;
+        let mut status =
+            unsafe { PdhExpandCounterPathW(path.as_ptr(), null_mut(), &mut counter_list_len) }
+                as PDHStatus;
+        if status != ERROR_SUCCESS {
+            return Err(status);
+        }
+        let mut unparsed_list = zeroed_buffer(counter_list_len as usize);
+        status = unsafe {
+            PdhExpandCounterPathW(
+                path.as_ptr(),
+                unparsed_list.as_mut_ptr(),
+                &mut counter_list_len,
+            )
+        } as PDHStatus;
+        if status != ERROR_SUCCESS {
+            return Err(status);
+        }
+        Ok(null_separated_to_vec(unparsed_list))
+    }
+
+    pub fn expand_counter_path_string<S: Into<String>>(
+        &self,
+        path: S,
+    ) -> Result<Vec<String>, PDHStatus> {
+        self.expand_counter_path_utf16(&str_to_utf16(&path.into()))
+            .map(|mut ps| {
+                ps.drain(0..)
+                    .map(|v| String::from_utf16_lossy(v.as_slice()))
+                    .collect()
+            })
     }
 }
 
@@ -397,7 +431,7 @@ impl<'a, ValueType> CounterStream<'a, ValueType> {
 
     /// Add an optional delay to the iterator. This is useful for when
     /// you want to ensure that you don't spam the counter collection.
-    /// Collecting too quickly will yeild garbage data from your counter.
+    /// Collecting too quickly will yield garbage data from your counter.
     pub fn with_delay<D: Into<Duration>>(mut self, delay: D) -> Self {
         self.collect_delay = Some(delay.into());
         return self;

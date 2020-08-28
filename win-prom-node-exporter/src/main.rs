@@ -1,8 +1,7 @@
-use std::cell::RefCell;
 use std::convert::Into;
 use std::env;
 use std::ffi::OsString;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow;
@@ -34,9 +33,9 @@ lazy_static::lazy_static! {
     static ref SERVICE_ARGS: std::sync::Mutex<Option<docopt::ArgvMap>> = Mutex::new(None);
 }
 
-const SERVICENAME: &'static str = "win_prom_node_exporter";
-const DISPLAYNAME: &'static str = "Windows Prometheus Node Exporter";
-const LOGNAME: &'static str = "Windows Prometheus Node Exporter Log";
+const SERVICENAME: &'static str = "prom_node_exporter";
+const DISPLAYNAME: &'static str = "Prometheus Node Exporter";
+const LOGNAME: &'static str = "Prometheus Node Exporter Log";
 
 const USAGE: &'static str = "
 Windows Prometheus Node Exporter
@@ -66,13 +65,15 @@ fn init_log(argv: &docopt::ArgvMap) -> anyhow::Result<()> {
             .init()?;
     } else if argv.get_bool("--debug") {
         eventlog::init(LOGNAME, log::Level::Debug)?;
+        log::set_max_level(log::LevelFilter::Debug);
     } else {
         eventlog::init(LOGNAME, log::Level::Info)?;
+        log::set_max_level(log::LevelFilter::Info);
     }
     Ok(())
 }
 
-fn win_service_main(args: Vec<OsString>) {
+fn win_service_main(_args: Vec<OsString>) {
     let service_event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop | ServiceControl::Shutdown => {
@@ -96,7 +97,7 @@ fn win_service_main(args: Vec<OsString>) {
             // The new state
             current_state: ServiceState::Running,
             // Accept stop events when running
-            controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+            controls_accepted: ServiceControlAccept::STOP,
             // Used to report an error when starting or stopping only, otherwise must be zero
             exit_code: ServiceExitCode::Win32(0),
             // Only used for pending states, otherwise must be zero
@@ -117,7 +118,7 @@ fn win_service_main(args: Vec<OsString>) {
                 // The new state
                 current_state: ServiceState::Stopped,
                 // Accept no events when running
-                controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+                controls_accepted: ServiceControlAccept::STOP,
                 // Used to report an error when starting or stopping only, otherwise must be zero
                 exit_code: ServiceExitCode::Win32(1),
                 // Only used for pending states, otherwise must be zero
@@ -130,7 +131,26 @@ fn win_service_main(args: Vec<OsString>) {
             .unwrap(); // if this failed then we are in deep trouble. Just crash.
 
         error!("Error starting service: {}", e);
+        return;
     }
+    status_handle
+        .set_service_status(ServiceStatus {
+            // Should match the one from system service registry
+            service_type: ServiceType::OWN_PROCESS,
+            // The new state
+            current_state: ServiceState::Stopped,
+            // Accept no events when running
+            controls_accepted: ServiceControlAccept::STOP,
+            // Used to report an error when starting or stopping only, otherwise must be zero
+            exit_code: ServiceExitCode::Win32(0),
+            // Only used for pending states, otherwise must be zero
+            checkpoint: 0,
+            // Only used for pending states, otherwise must be zero
+            wait_hint: Duration::default(),
+            // Unused for setting status
+            process_id: None,
+        })
+        .unwrap(); // if this failed then we are in deep trouble. Just crash.
 }
 
 fn win_service_impl<F>(ready_hook: F) -> anyhow::Result<()>
@@ -143,10 +163,10 @@ where
             panic!("Something very unexpected happen. This is a bug.");
         }
     };
-    debug!("{:?}", argv);
+    debug!("service_impl args{:?}", argv);
     let registry = prometheus::Registry::new();
 
-    dbg!(ready_hook()?);
+    ready_hook()?;
 
     let listen_host = argv.get_str("--listenHost");
     let delay_secs: u64 = argv.get_count("--delaySecs");
@@ -156,13 +176,17 @@ where
             info!("Starting server on {}", listen_host);
             let server = tiny_http::Server::http(listen_host).unwrap();
             loop {
-                if *STOP_SIGNAL.read().unwrap() {
-                    debug!("Stopping prometheus metric server thread.");
-                    break;
+                {
+                    if *STOP_SIGNAL.read().unwrap() {
+                        info!("Stopping prometheus metric server thread.");
+                        return;
+                    }
                 }
-                info!("Waiting for request");
-                match server.recv() {
-                    Ok(req) => {
+                debug!("Waiting for request");
+                // NOTE(jwall): We have to not block for longer than the 10 millis to avoid not detecting
+                // the stop signal above.
+                match server.recv_timeout(std::time::Duration::from_millis(10)) {
+                    Ok(Some(req)) => {
                         info!("Handling request");
                         let mut buffer = vec![];
                         // Gather the metrics.
@@ -174,6 +198,9 @@ where
                         if let Err(e) = req.respond(response) {
                             error!("Error responding to request {}", e);
                         }
+                    }
+                    Ok(None) => {
+                        // Receive timed out so noop
                     }
                     Err(e) => {
                         error!("Invalid http request! {}", e);
@@ -208,9 +235,11 @@ where
                 .unwrap();
             info!("Starting collection thread");
             loop {
-                if *STOP_SIGNAL.read().unwrap() {
-                    debug!("Stopping metric collection thread.");
-                    break;
+                {
+                    if *STOP_SIGNAL.read().unwrap() {
+                        info!("Stopping metric collection thread.");
+                        return;
+                    }
                 }
                 for (metric, stream) in pairs {
                     if let Ok(v) = stream.next() {
@@ -248,8 +277,12 @@ fn flags_from_argmap(argv: &docopt::ArgvMap) -> Vec<OsString> {
 fn main() -> anyhow::Result<()> {
     let docopt = flags();
     let argv = docopt.parse().unwrap_or_else(|e| e.exit());
-    let mut guard = SERVICE_ARGS.lock().unwrap();
-    *guard = Some(argv.clone());
+
+    {
+        // Ensure this is scoped very tightly
+        let mut guard = SERVICE_ARGS.lock().unwrap();
+        *guard = Some(argv.clone());
+    }
 
     init_log(&argv).unwrap();
     if argv.get_bool("--install") {
