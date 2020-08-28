@@ -11,7 +11,7 @@ use log::{debug, error, info};
 use prometheus;
 use prometheus::Encoder;
 use winapi_perf_wrapper::constants::pdh_status_friendly_name;
-use winapi_perf_wrapper::{CounterStream, PDHStatus, PdhQuery, ValueStream, PDH};
+use winapi_perf_wrapper::{CounterStream, PdhQuery, ValueStream};
 use windows_service;
 use windows_service::service::{
     ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
@@ -46,24 +46,13 @@ fn flags() -> docopt::Docopt {
     docopt::Docopt::new(USAGE).unwrap()
 }
 
-fn get_value_stream<'query_life, NumType>(
-    query: &'query_life PdhQuery,
-    path: &str,
-) -> Result<CounterStream<'query_life, NumType>, PDHStatus> {
-    query.get_value_stream_from_path::<_, NumType>(path)
-}
-
 fn init_log(argv: &docopt::ArgvMap) -> anyhow::Result<()> {
     if argv.get_bool("--no-service") {
-        dbg!(stderrlog::new()
+        stderrlog::new()
             .timestamp(stderrlog::Timestamp::Millisecond)
-            .verbosity(if argv.get_bool("--debug") || cfg!(debug_assertions) {
-                3
-            } else {
-                2
-            })
-            .init())?;
-    } else if argv.get_bool("--debug") || cfg!(debug_assertions) {
+            .verbosity(if argv.get_bool("--debug") { 3 } else { 2 })
+            .init()?;
+    } else if argv.get_bool("--debug") {
         eventlog::init(LOGNAME, log::Level::Debug)?;
     } else {
         eventlog::init(LOGNAME, log::Level::Info)?;
@@ -73,15 +62,14 @@ fn init_log(argv: &docopt::ArgvMap) -> anyhow::Result<()> {
 
 fn win_service_main(args: Vec<OsString>) {
     let docopt = flags();
+    info!("Started Service with args: {:?}", args);
     let parsed = docopt
         .argv(args.iter().map(|s| s.to_string_lossy().to_owned()))
         .parse();
     let service_event_handler = move |control_event| -> ServiceControlHandlerResult {
+        // TODO correctly handle the stop event.
         match control_event {
-            ServiceControl::Interrogate => {
-                // TODO correctly handle the stop event.
-                ServiceControlHandlerResult::NoError
-            }
+            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
         }
     };
@@ -133,7 +121,6 @@ fn win_service_main(args: Vec<OsString>) {
             error!("Error starting service: {}", e);
         }
     } else {
-        eventlog::init(LOGNAME, log::Level::Debug).unwrap();
         status_handle
             .set_service_status(ServiceStatus {
                 // Should match the one from system service registry
@@ -156,26 +143,10 @@ fn win_service_main(args: Vec<OsString>) {
     }
 }
 
-fn build_metric_pair<'query_life>(
-    name: &str,
-    path: &str,
-    registry: &prometheus::Registry,
-    query: &'query_life PdhQuery,
-) -> anyhow::Result<(prometheus::GaugeVec, CounterStream<'query_life, f64>)> {
-    let gauge = prometheus::GaugeVec::new(prometheus::Opts::new(name, path), &[])?;
-    registry.register(Box::new(gauge.clone()))?;
-    Ok((
-        gauge,
-        get_value_stream::<f64>(query, path)
-            .map_err(|s| anyhow::Error::msg(pdh_status_friendly_name(s)))?,
-    ))
-}
-
 fn win_service_impl<F>(argv: docopt::ArgvMap, ready_hook: F) -> anyhow::Result<()>
 where
     F: FnOnce() -> anyhow::Result<()>,
 {
-    init_log(&argv).unwrap();
     let registry = prometheus::Registry::new();
 
     dbg!(ready_hook()?);
@@ -210,21 +181,28 @@ where
             }
         });
         s.spawn(|_| {
-            // query needs to move into this thread completely if possible.
-            let mut pdh = PDH::new();
             debug!("Opening PDH Performance counter query");
-            let query = pdh.open_query().unwrap();
-            debug!("Setting up counters and prometheus guages");
             let mut binding = binding::CounterToPrometheus::try_new(&registry).unwrap();
+            debug!("Setting up counters and prometheus guages");
             let pairs = binding
                 .register_pairs(vec![
                     ("cpu_total_pct", perf_paths::CPU_TOTAL_PCT),
+                    ("cpu_user_pct", perf_paths::CPU_USER_PCT),
                     ("cpu_idle_pct", perf_paths::CPU_IDLE_PCT),
                     ("cpu_privileged_pct", perf_paths::CPU_PRIVILEGED_PCT),
+                    ("cpu_priority_pct", perf_paths::CPU_PRIORITY_PCT),
                     ("cpu_frequency_gauge", perf_paths::CPU_FREQUENCY),
                     ("mem_available_bytes", perf_paths::MEM_AVAILABLE_BYTES),
                     ("mem_cache_bytes", perf_paths::MEM_CACHE_BYTES),
                     ("mem_committed_bytes", perf_paths::MEM_COMMITTED_BYTES),
+                    ("disk_pct_read_time", perf_paths::DISK_PCT_READ_TIME),
+                    ("disk_pct_write_time", perf_paths::DISK_PCT_WRITE_TIME),
+                    ("disk_read_bytes_sec", perf_paths::DISK_READ_BYTES_SEC),
+                    ("disk_write_bytes_sec", perf_paths::DISK_WRITE_BYTES_SEC),
+                    ("sys_processes_count", perf_paths::SYS_PROCESSES_COUNT),
+                    ("sys_threads_count", perf_paths::SYS_THREADS_COUNT),
+                    ("sys_context_switch_sec", perf_paths::SYS_CONTEXT_SWITCH_SEC),
+                    ("sys_system_calls_sec", perf_paths::SYS_SYSTEM_CALLS_SEC),
                 ])
                 .unwrap();
             info!("Starting collection thread");
@@ -266,6 +244,7 @@ fn main() -> anyhow::Result<()> {
     let docopt = flags();
     let argv = docopt.parse().unwrap_or_else(|e| e.exit());
 
+    init_log(&argv).unwrap();
     if argv.get_bool("--install") {
         let manager =
             ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)?;
@@ -277,9 +256,9 @@ fn main() -> anyhow::Result<()> {
             start_type: ServiceStartType::OnDemand,
             error_control: ServiceErrorControl::Normal,
             // Derive this from our current path.
-            executable_path: dbg!(env::current_exe()?),
+            executable_path: env::current_exe()?,
             // Derive this our existing arguments.
-            launch_arguments: dbg!(flags_from_argmap(&argv)),
+            launch_arguments: flags_from_argmap(&argv),
             dependencies: vec![],
             account_name: None, // run as System
             account_password: None,
@@ -295,7 +274,6 @@ fn main() -> anyhow::Result<()> {
     } else if argv.get_bool("--no-service") {
         win_service_impl(argv, || Ok(()))?;
     } else {
-        // TODO(jwall): non-service mode.
         windows_service::service_dispatcher::start(SERVICENAME, ffi_service_main)?;
     }
     Ok(())
