@@ -11,12 +11,26 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use anyhow;
+use docopt;
 
-use winapi::um::winbase::GetComputerNameW;
 use winapi_perf_wrapper::constants;
 use winapi_perf_wrapper::*;
 
-pub fn print_counters(pdh: &mut PDH) {
+const USAGE: &'static str = "
+Performance Counter Utility
+
+Usage: perf-util [options]
+
+Options:
+    -h --help       Show this help text
+    --machine<m>    The MachineName to use
+    --expand=<p>    Expand a counter path to its variants
+    --stream=<p>    Stream the values for a performance counter
+    --list          List available counters
+";
+
+pub fn print_counters(pdh: &mut PDH) -> anyhow::Result<()> {
     let mut counter_paths = pdh
         .enumerate_counters()
         .map_err(|e| constants::pdh_status_friendly_name(e))
@@ -25,9 +39,10 @@ pub fn print_counters(pdh: &mut PDH) {
     for obj in counter_paths {
         println!("{}", obj);
     }
+    Ok(())
 }
 
-pub fn print_object_counters(pdh: &mut PDH, obj: &str) {
+pub fn print_object_counters(pdh: &mut PDH, obj: &str) -> anyhow::Result<()> {
     println!("Counters for {}:", obj);
     let (counters, instances) = pdh
         .enumerate_items_string(obj)
@@ -44,9 +59,10 @@ pub fn print_object_counters(pdh: &mut PDH, obj: &str) {
             println!("\t\\{}{}\\{}", obj, i, c);
         }
     }
+    Ok(())
 }
 
-pub fn print_performance_objects(pdh: &mut PDH) {
+pub fn print_performance_objects(pdh: &mut PDH) -> anyhow::Result<()> {
     println!("Performance Counter objects:");
     let mut sorted_counters = pdh
         .enumerate_objects_string()
@@ -56,6 +72,7 @@ pub fn print_performance_objects(pdh: &mut PDH) {
     for obj in sorted_counters {
         println!("\t{}", obj);
     }
+    Ok(())
 }
 
 pub fn print_counter_value(pdh: &mut PDH, path: &str) {
@@ -74,38 +91,45 @@ pub fn print_counter_value(pdh: &mut PDH, path: &str) {
     println!("{}: {}", path, value);
 }
 
-fn main() {
-    let mut name_size: u32 = 32;
-    let mut machine_name = Vec::with_capacity(name_size as usize);
-    machine_name.resize(name_size as usize, 0);
-    let status = unsafe { GetComputerNameW(machine_name.as_mut_ptr(), &mut name_size) }
-        as constants::PDHStatus;
-    if status == 0 {
-        panic!("Failed to get machine name! error_code {}", status);
-    }
-    // We need our string to be null terminated
-    machine_name.resize(name_size as usize, 0);
-    println!(
-        "MachineName: {}",
-        String::from_utf16_lossy(machine_name.as_slice())
-    );
-    let mut pdh = PDH::new().with_machine_name(machine_name);
-    //let cpu_counter = r"\\JWALL-SURFACE\Processor information(_Total)\% Processor Time";
-    let cpu_counter = r"\\JWALL-SURFACE\Processor Information(_Total)\% Processor Time";
-    let query = pdh
-        .open_query()
-        .map_err(|e| constants::pdh_status_friendly_name(e))
-        .unwrap();
-    let iterator: CounterStream<i32> = query
-        .get_value_stream_from_path(cpu_counter)
-        .map_err(|s| constants::pdh_status_friendly_name(s))
-        .unwrap()
-        .with_delay(std::time::Duration::from_millis(1000));
-    //let mem_counter = r"\\JWALL-SURFACE\Memory\Available Bytes";
-    loop {
-        match iterator.next() {
-            Ok(v) => println!("{}: {}", cpu_counter, v),
-            Err(s) => eprintln!("Err: {}", constants::pdh_status_friendly_name(s)),
+fn main() -> anyhow::Result<()> {
+    let parser = docopt::Docopt::new(USAGE)?;
+    let argv = parser.parse()?;
+    let mut pdh = if let Some(machine) = argv.find("--machine") {
+        PDH::new().with_machine_name(machine.as_str().encode_utf16().collect())
+    } else {
+        PDH::new()
+    };
+
+    if argv.get_bool("--list") {
+        print_counters(&mut pdh)?;
+    } else if argv.get_str("--expand") != "" {
+        let path = argv.get_str("--expand");
+        let paths = pdh
+            .expand_counter_path_string(path)
+            .map_err(|e| constants::pdh_status_friendly_name(e))
+            .unwrap();
+        for p in paths {
+            println!("{}", p);
+        }
+    } else if argv.get_str("--stream") != "" {
+        let path = argv.get_str("--stream");
+        let query = pdh
+            .open_query()
+            .map_err(|e| constants::pdh_status_friendly_name(e))
+            .unwrap();
+        let iterator: CounterStream<i32> = query
+            .get_value_stream_from_path(path)
+            .map_err(|s| constants::pdh_status_friendly_name(s))
+            .unwrap()
+            .with_delay(std::time::Duration::from_millis(1000));
+        // Throw away the first value. It will always be garbage.
+        let _ = iterator.next();
+        loop {
+            match iterator.next() {
+                Ok(v) => println!("{}: {}", path, v),
+                Err(s) => eprintln!("Err: {}", constants::pdh_status_friendly_name(s)),
+            }
         }
     }
+    Ok(())
 }

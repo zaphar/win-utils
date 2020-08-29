@@ -257,7 +257,7 @@ impl PDH {
         let mut status =
             unsafe { PdhExpandCounterPathW(path.as_ptr(), null_mut(), &mut counter_list_len) }
                 as PDHStatus;
-        if status != ERROR_SUCCESS {
+        if status != constants::PDH_MORE_DATA {
             return Err(status);
         }
         let mut unparsed_list = zeroed_buffer(counter_list_len as usize);
