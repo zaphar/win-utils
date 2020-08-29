@@ -126,7 +126,7 @@ fn main() -> anyhow::Result<()> {
         let _ = iterator.next();
         loop {
             match iterator.next() {
-                Ok(v) => println!("{}: {}", path, v),
+                Ok(v) => println!("{}\t{}", path, v),
                 Err(s) => eprintln!("Err: {}", constants::pdh_status_friendly_name(s)),
             }
         }
