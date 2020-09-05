@@ -14,10 +14,23 @@
 
 // Tool that owns a query and borrows a registry and sets up the bindings between
 // performance counters and prometheus guages.
+use lazy_static;
+use regex::Regex;
 
 use prometheus::{GaugeVec, Registry};
 use winapi_perf_wrapper::constants::pdh_status_friendly_name;
 use winapi_perf_wrapper::{CounterStream, PDHStatus, PdhQuery, PDH};
+
+lazy_static::lazy_static! {
+    static ref INSTANCE_REGEX: Regex = Regex::new(r".*\((.*)\)").unwrap();
+}
+
+fn parse_instance(path: &str) -> String {
+    match INSTANCE_REGEX.captures(path) {
+        Some(caps) => caps.get(1).unwrap().as_str().to_owned(),
+        None => String::new(),
+    }
+}
 
 fn get_value_stream<'query_life, NumType>(
     query: &'query_life PdhQuery,
@@ -27,14 +40,15 @@ fn get_value_stream<'query_life, NumType>(
 }
 
 fn build_metric_pair<'query_life>(
-    name: &str,
+    name: &'static str,
     path: &str,
     registry: &prometheus::Registry,
     query: &'query_life PdhQuery,
-) -> anyhow::Result<(GaugeVec, CounterStream<'query_life, f64>)> {
+) -> anyhow::Result<(&'static str, GaugeVec, CounterStream<'query_life, f64>)> {
     let gauge = GaugeVec::new(prometheus::Opts::new(name, path), &[])?;
     registry.register(Box::new(gauge.clone()))?;
     Ok((
+        name,
         gauge,
         get_value_stream::<f64>(query, path)
             .map_err(|s| anyhow::Error::msg(pdh_status_friendly_name(s)))?,
@@ -42,30 +56,69 @@ fn build_metric_pair<'query_life>(
 }
 
 pub struct CounterToPrometheus<'myself, 'registry> {
+    pdh: PDH,
     query: PdhQuery,
     registry: &'registry Registry,
-    pairs: Vec<(GaugeVec, CounterStream<'myself, f64>)>,
+    _marker: std::marker::PhantomData<&'myself PdhQuery>,
 }
 
 impl<'myself, 'registry> CounterToPrometheus<'myself, 'registry> {
     pub fn try_new(registry: &'registry Registry) -> anyhow::Result<Self> {
+        let pdh = PDH::new();
+        let query = pdh
+            .open_query()
+            .map_err(|s| anyhow::Error::msg(pdh_status_friendly_name(s)))?;
         Ok(Self {
-            query: PDH::new()
-                .open_query()
-                .map_err(|s| anyhow::Error::msg(pdh_status_friendly_name(s)))?,
+            pdh: pdh,
+            query: query,
             registry: registry,
-            pairs: Vec::new(),
+            _marker: std::marker::PhantomData,
         })
     }
 
     pub fn register_pairs(
-        &'myself mut self,
-        name_path_pairs: Vec<(&str, &str)>,
-    ) -> anyhow::Result<&Vec<(GaugeVec, CounterStream<'myself, f64>)>> {
+        &'myself self,
+        name_path_pairs: Vec<(&'static str, &str)>,
+    ) -> anyhow::Result<Vec<(&str, GaugeVec, CounterStream<'myself, f64>)>> {
+        let mut pairs = Vec::new();
         for (name, path) in name_path_pairs {
             let pair = build_metric_pair(name, path, self.registry, &self.query)?;
-            self.pairs.push(pair);
+            pairs.push(pair);
         }
-        Ok(&self.pairs)
+        Ok(pairs)
+    }
+
+    pub fn register_wildcard_pairs(
+        &'myself self,
+        name_path_pairs: Vec<(&'static str, &str)>,
+    ) -> anyhow::Result<
+        Vec<(
+            &str,
+            GaugeVec,
+            (&'static str, String),
+            CounterStream<'myself, f64>,
+        )>,
+    > {
+        let mut pairs = Vec::new();
+        for (name, path) in name_path_pairs {
+            let expanded_paths = self
+                .pdh
+                .expand_counter_path_string(path)
+                .map_err(|s| anyhow::Error::msg(pdh_status_friendly_name(s)))?;
+            for expanded in expanded_paths {
+                // TODO(jwall): Parse the instance out first.
+                let instance = parse_instance(&expanded);
+                let gauge = GaugeVec::new(prometheus::Opts::new(name, &expanded), &["instance"])?;
+                self.registry.register(Box::new(gauge.clone()))?;
+                pairs.push((
+                    name,
+                    gauge,
+                    ("instance", instance),
+                    get_value_stream::<f64>(&self.query, &expanded)
+                        .map_err(|s| anyhow::Error::msg(pdh_status_friendly_name(s)))?,
+                ));
+            }
+        }
+        Ok(pairs)
     }
 }

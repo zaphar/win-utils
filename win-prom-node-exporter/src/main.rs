@@ -223,9 +223,9 @@ where
             }
         });
         s.spawn(|_| {
-            debug!("Opening PDH Performance counter query");
-            let mut binding = binding::CounterToPrometheus::try_new(&registry).unwrap();
             debug!("Setting up counters and prometheus guages");
+            let binding = binding::CounterToPrometheus::try_new(&registry).unwrap();
+
             let pairs = binding
                 .register_pairs(vec![
                     ("cpu_total_pct", perf_paths::CPU_TOTAL_PCT),
@@ -247,6 +247,35 @@ where
                     ("sys_system_calls_sec", perf_paths::SYS_SYSTEM_CALLS_SEC),
                 ])
                 .unwrap();
+
+            let labled_pairs = binding
+                .register_wildcard_pairs(vec![
+                    (
+                        "network_ifc_bytes_rcvd_sec",
+                        perf_paths::NET_IFC_BYTES_RCVD_SEC,
+                    ),
+                    (
+                        "network_ifc_bytes_sent_sec",
+                        perf_paths::NET_IFC_BYTES_SENT_SEC,
+                    ),
+                    (
+                        "network_ifc_pkts_rcvd_sec",
+                        perf_paths::NET_IFC_PKTS_RCVD_SEC,
+                    ),
+                    (
+                        "network_ifc_pkts_sent_sec",
+                        perf_paths::NET_IFC_PKTS_SENT_SEC,
+                    ),
+                    (
+                        "network_ifc_pkts_rcvd_err",
+                        perf_paths::NET_IFC_PKTS_RCVD_ERR,
+                    ),
+                    (
+                        "network_ifc_bytes_rcvd_discard",
+                        perf_paths::NET_IFC_PKTS_RCVD_DISCARD,
+                    ),
+                ])
+                .unwrap();
             info!("Starting collection thread");
             loop {
                 {
@@ -255,9 +284,16 @@ where
                         return;
                     }
                 }
-                for (metric, stream) in pairs {
+                for (_, metric, stream) in pairs.iter() {
                     if let Ok(v) = stream.next() {
-                        metric.with(&prometheus::labels! {}).set(v as f64);
+                        metric.with(&prometheus::labels! {}).set(v);
+                    }
+                }
+                for (_, metric, (label_name, label_value), stream) in labled_pairs.iter() {
+                    if let Ok(v) = stream.next() {
+                        let mut labels = std::collections::HashMap::with_capacity(1);
+                        labels.insert(*label_name, label_value.as_str());
+                        metric.with(&labels).set(v);
                     }
                 }
                 debug!("Sleeping until next collection");

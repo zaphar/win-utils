@@ -2,5 +2,5 @@
 members = [
     "winapi-perf-wrapper",
     "perf-util",
-    "win-prom-node-exporter", 
+    "win-prom-node-exporter",
 ]
